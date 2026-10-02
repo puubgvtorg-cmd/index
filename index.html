@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>MAKCU Pad</title>
+<style>
+:root{--bg:#111;--fg:#eee;--card:#222;--acc:#3b82f6}
+@media(prefers-color-scheme:light){:root{--bg:#f4f4f5;--fg:#111;--card:#e4e4e7}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:16px system-ui;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+header{display:flex;gap:8px;align-items:center;padding:8px 12px}
+#dot{width:10px;height:10px;border-radius:50%;background:#e11}
+#st{flex:1;font-size:13px}
+button,input,textarea{font:inherit;color:var(--fg);background:var(--card);border:0;border-radius:10px;padding:10px;width:auto}
+button{background:var(--acc);color:#fff}
+nav{display:flex;gap:6px;padding:0 12px 8px}
+nav button{flex:1;background:var(--card);color:var(--fg)}
+nav button.on{background:var(--acc);color:#fff}
+main{flex:1;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column}
+section{display:none;flex:1;flex-direction:column;gap:8px}
+section.on{display:flex}
+#pad{flex:1;background:var(--card);border-radius:16px;touch-action:none;display:flex;align-items:center;justify-content:center;opacity:.9;user-select:none;-webkit-user-select:none;text-align:center;font-size:13px}
+.row{display:flex;gap:6px}.row .big{flex:1;text-align:left}
+.row button:last-child:not(.big){background:var(--card);color:var(--fg)}
+input,textarea{width:100%}
+textarea{min-height:110px;font-family:ui-monospace,monospace}
+label{font-size:13px;opacity:.7}
+pre{white-space:pre-wrap;word-break:break-all;font-size:12px}
+dialog{border:0;border-radius:16px;background:var(--bg);color:var(--fg);width:90%;max-width:420px}
+dialog::backdrop{background:#0008}
+dialog form{display:flex;flex-direction:column;gap:8px}
+</style></head><body>
+<header><div id="dot"></div><div id="st">Не подключено</div><button id="cn">Подключить</button></header>
+<nav id="nav"><button data-t="pad" class="on">Тачпад</button><button data-t="binds">Бинды</button><button data-t="set">Настр.</button><button data-t="log">Лог</button></nav>
+<main>
+<section id="pad_s" class="on"><div id="pad">Тап = клик<br>Перетаскивание = движение</div></section>
+<section id="binds_s"><div id="binds"></div><button id="add">+ Добавить бинд</button></section>
+<section id="set_s">
+<label>Шаблон движения ({x} {y})</label><input id="mv" autocapitalize="off" autocorrect="off">
+<label>Чувствительность</label><input id="sens" type="range" min="0.2" max="5" step="0.1">
+<label>Команды при тапе (строка = команда, wait N = пауза мс)</label><textarea id="tap" autocapitalize="off" autocorrect="off"></textarea>
+<label>Baud UART (ESP32 ↔ MAKCU)</label><div class="row"><input id="baud" inputmode="numeric"><button id="bd">Применить</button></div>
+<label>Ручная команда</label><div class="row"><input id="raw" placeholder="km.move(10,0)" autocapitalize="off" autocorrect="off"><button id="rs">Отпр.</button></div>
+</section>
+<section id="log_s"><pre id="lg"></pre></section>
+</main>
+<dialog id="dlg"><form method="dialog">
+<label>Название</label><input id="en"><label>Команды</label><textarea id="et" autocapitalize="off" autocorrect="off"></textarea>
+<label>Горячая клавиша (внешняя клавиатура, 1 символ)</label><input id="ek" maxlength="1">
+<div class="row"><button type="button" id="es">Сохранить</button><button type="button" id="ed" style="background:#e11">Удалить</button><button type="button" id="ec" style="background:var(--card);color:var(--fg)">Отмена</button></div>
+</form></dialog>
+<script>
+const SVC='6e400001-b5a3-f393-e0a9-e50e24dcca9e',RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e',TXU='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const $=s=>document.querySelector(s);
+const def={cmds:[{name:'ЛКМ клик',text:'km.left(1)\nwait 40\nkm.left(0)',key:'q'},{name:'ПКМ клик',text:'km.right(1)\nwait 40\nkm.right(0)',key:'e'}],move:'km.move({x},{y})',tap:'km.left(1)\nwait 40\nkm.left(0)',sens:1.5,baud:'115200'};
+let S;try{S=JSON.parse(localStorage.getItem('mk'))||def}catch(e){S=def}
+const save=()=>{try{localStorage.setItem('mk',JSON.stringify(S))}catch(e){}};
+let dev,rx,busy=false,q=[];
+
+function st(t,on){$('#st').textContent=t;$('#dot').style.background=on?'#2c2':'#e11'}
+function logAdd(t){const l=$('#lg');l.textContent=(l.textContent+t).slice(-4000)}
+
+async function connect(){
+  if(!navigator.bluetooth){st('Нет Web Bluetooth — открой в Bluefy',0);return}
+  try{
+    if(!dev){
+      dev=await navigator.bluetooth.requestDevice({filters:[{services:[SVC]}]});
+      dev.addEventListener('gattserverdisconnected',()=>{rx=null;q=[];st('Отключено',0);$('#cn').textContent='Подключить'});
+    }
+    st('Подключение…',0);
+    const srv=await dev.gatt.connect(),svc=await srv.getPrimaryService(SVC);
+    rx=await svc.getCharacteristic(RXU);
+    const tx=await svc.getCharacteristic(TXU);
+    await tx.startNotifications();
+    tx.addEventListener('characteristicvaluechanged',e=>logAdd(new TextDecoder().decode(e.target.value)));
+    st('Подключено: '+(dev.name||'ESP32'),1);$('#cn').textContent='Отключить';
+  }catch(e){st('Ошибка: '+e.message,0)}
+}
+$('#cn').onclick=()=>{if(dev&&dev.gatt.connected)dev.gatt.disconnect();else connect()};
+
+function send(s){q.push(new TextEncoder().encode(s+'\r\n'));pump()}
+async function pump(){
+  if(busy||!rx)return;busy=true;
+  while(q.length&&rx){const d=q.shift();
+    for(let i=0;i<d.length;i+=20){try{await rx.writeValueWithoutResponse(d.slice(i,i+20))}catch(e){q=[];break}}}
+  busy=false;
+}
+async function run(t){
+  for(const l of t.split('\n').map(x=>x.trim()).filter(Boolean)){
+    if(l.startsWith('wait '))await new Promise(r=>setTimeout(r,+l.slice(5)||0));else send(l);
+  }
+}
+
+// тачпад
+const pad=$('#pad');let lp=null,tot=0,mx=0,my=0;
+pad.onpointerdown=e=>{pad.setPointerCapture(e.pointerId);lp=[e.clientX,e.clientY];tot=0};
+pad.onpointermove=e=>{if(!lp)return;const dx=e.clientX-lp[0],dy=e.clientY-lp[1];lp=[e.clientX,e.clientY];tot+=Math.abs(dx)+Math.abs(dy);mx+=dx*S.sens;my+=dy*S.sens};
+pad.onpointerup=pad.onpointercancel=()=>{if(lp&&tot<4)run(S.tap);lp=null;mx=my=0};
+setInterval(()=>{const ix=Math.trunc(mx),iy=Math.trunc(my);
+  if((ix||iy)&&q.length<3){mx-=ix;my-=iy;send(S.move.replace('{x}',ix).replace('{y}',iy))}},16);
+
+// бинды
+function renderBinds(){
+  const el=$('#binds');el.innerHTML='';el.style.cssText='display:flex;flex-direction:column;gap:6px';
+  S.cmds.forEach((c,i)=>{
+    const d=document.createElement('div');d.className='row';
+    const b=document.createElement('button');b.className='big';b.textContent=c.name+(c.key?'  ['+c.key+']':'');b.onclick=()=>run(c.text);
+    const e=document.createElement('button');e.textContent='✎';e.onclick=()=>edit(i);
+    d.append(b,e);el.append(d);
+  });
+}
+let ei=-1;
+function edit(i){ei=i;const c=i<0?{name:'Новая',text:'',key:''}:S.cmds[i];
+  $('#en').value=c.name;$('#et').value=c.text;$('#ek').value=c.key;$('#dlg').showModal()}
+$('#add').onclick=()=>edit(-1);
+$('#es').onclick=()=>{const c={name:$('#en').value,text:$('#et').value,key:$('#ek').value.toLowerCase()};
+  if(ei<0)S.cmds.push(c);else S.cmds[ei]=c;save();renderBinds();$('#dlg').close()};
+$('#ed').onclick=()=>{if(ei>=0)S.cmds.splice(ei,1);save();renderBinds();$('#dlg').close()};
+$('#ec').onclick=()=>$('#dlg').close();
+document.addEventListener('keydown',e=>{
+  if(e.target.matches('input,textarea'))return;
+  const c=S.cmds.find(c=>c.key&&c.key===e.key.toLowerCase());
+  if(c){e.preventDefault();run(c.text)}
+});
+
+// настройки
+$('#mv').value=S.move;$('#sens').value=S.sens;$('#tap').value=S.tap;$('#baud').value=S.baud;
+$('#mv').oninput=e=>{S.move=e.target.value;save()};
+$('#sens').oninput=e=>{S.sens=+e.target.value;save()};
+$('#tap').oninput=e=>{S.tap=e.target.value;save()};
+$('#baud').oninput=e=>{S.baud=e.target.value;save()};
+$('#bd').onclick=()=>send('#baud '+S.baud);
+$('#rs').onclick=()=>{if($('#raw').value)send($('#raw').value)};
+
+// вкладки
+$('#nav').onclick=e=>{const t=e.target.dataset.t;if(!t)return;
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b===e.target));
+  document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===t+'_s'))};
+renderBinds();
+</script></body></html>
